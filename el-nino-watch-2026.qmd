@@ -1,0 +1,928 @@
+---
+title: "2026 Super El Niño Watch: Live Thermal Stress Monitoring"
+subtitle: "Tracking coral bleaching risk across seven reef sites during the 2026 Super El Niño period"
+author: "Frank Velez"
+date: today
+date-format: "MMMM D, YYYY — HH:mm UTC"
+categories: [coral reefs, NOAA CRW, DHW, El Niño, live monitoring]
+image: ../images/el-nino-watch-preview.png
+description: "Live thermal stress monitoring across seven reef sites during the 2026 Super El Niño period, using NOAA Coral Reef Watch DHW data. Updated daily."
+freeze: false
+execute:
+  echo: fenced
+  warning: false
+  message: false
+jupyter: el-nino-2026
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-tools: true
+    theme: cosmo
+---
+
+```{python}
+# =============================================================================
+# Cell 1 — Setup: imports, configuration, parser, fetch helpers
+# =============================================================================
+import os
+import pathlib
+from io import StringIO
+from datetime import datetime, timezone
+
+import requests
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
+# -- Output directories -------------------------------------------------------
+PROJECT_ROOT = pathlib.Path("/Users/renatus/code/el-nino-watch-2026")
+CACHE_DIR    = PROJECT_ROOT / "data" / "raw"
+OUTPUT_DIR   = PROJECT_ROOT / "data" / "processed"
+os.makedirs(CACHE_DIR,  exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# -- Site configuration -------------------------------------------------------
+STATIONS = {
+    "Florida Keys": {
+        "station_id": "florida_keys",
+        "lat": 24.55, "lon": -81.50,
+        "ocean": "Caribbean/Atlantic",
+    },
+    "Cayman Islands": {
+        "station_id": "cayman_islands",
+        "lat": 19.30, "lon": -81.38,
+        "ocean": "Caribbean",
+    },
+    "Honduras (Bay Islands)": {
+        "station_id": "honduras",
+        "lat": 16.32, "lon": -86.55,
+        "ocean": "Caribbean",
+    },
+    "ABC Islands (Bonaire)": {
+        "station_id": "abc_islands",
+        "lat": 12.15, "lon": -68.28,
+        "ocean": "Caribbean",
+    },
+    "Great Barrier Reef (Central)": {
+        "station_id": "gbr_central",
+        "lat": -18.00, "lon": 147.00,
+        "ocean": "Indo-Pacific",
+    },
+    "Palau": {
+        "station_id": "palau",
+        "lat": 7.50, "lon": 134.50,
+        "ocean": "Indo-Pacific",
+    },
+    "West Papua (Raja Ampat)": {
+        "station_id": "west_papua",
+        "lat": -1.50, "lon": 132.00,
+        "ocean": "Indo-Pacific",
+    },
+}
+
+CRW_BASE_URL = "https://coralreefwatch.noaa.gov/product/vs/data/{station_id}.txt"
+ONI_URL      = "https://www.cpc.ncep.noaa.gov/data/indices/oni.ascii.txt"
+
+# -- Alert level classifier (NOAA 5-level system, expanded December 2023) -----
+def dhw_to_alert(dhw):
+    """
+    Map a DHW value (deg C-weeks) to a NOAA CRW bleaching alert level string.
+
+    The 5-level system was expanded from the legacy 2-level system in December
+    2023 in response to extreme heat stress events that exceeded Level 2 ceilings.
+    Levels 3-5 represent conditions with no historical precedent at most sites.
+    """
+    if pd.isna(dhw) or dhw < 0:
+        return "No Stress"
+    elif dhw < 4:
+        return "Bleaching Watch"
+    elif dhw < 8:
+        return "Bleaching Warning"
+    elif dhw < 12:
+        return "Alert Level 1"
+    elif dhw < 16:
+        return "Alert Level 2"
+    elif dhw < 20:
+        return "Alert Level 3"
+    elif dhw < 24:
+        return "Alert Level 4"
+    else:
+        return "Alert Level 5"
+
+# -- CRW v3.1 parser ----------------------------------------------------------
+def parse_crw_header(lines):
+    """
+    Extract metadata from the CRW Virtual Station plain-text header block.
+
+    The header has no comment markers -- it is free-form text followed by a
+    space-delimited data table. We scan for sentinel strings to locate the MMM
+    value and the data table start line.
+    """
+    meta = {}
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "Averaged Maximum Monthly Mean:":
+            meta["mmm"] = float(lines[i + 1].strip())
+        if stripped == "Name:":
+            meta["name"] = lines[i + 1].strip()
+        if stripped.startswith("YYYY MM DD"):
+            meta["data_start_line"] = i
+            break
+    return meta
+
+
+def fetch_crw_station(site_name, station_id, force_refresh=False):
+    """
+    Fetch a NOAA CRW Virtual Station .txt file and return a tidy DataFrame.
+
+    File format: multi-line plain-text header (no # markers), followed by a
+    space-delimited data table with columns:
+        YYYY MM DD SST_MIN SST_MAX SST@90th_HS SSTA@90th_HS 90th_HS>0
+        DHW_from_90th_HS>1 BAA_7day_max
+
+    The header contains the MMM baseline value which we extract and carry
+    through as a site-level attribute. Caches the raw .txt file to disk to
+    preserve the original header and MMM value across sessions.
+    """
+    cache_path = CACHE_DIR / f"{station_id}.txt"
+
+    if not force_refresh and cache_path.exists():
+        with open(cache_path, "r") as f:
+            raw_lines = f.readlines()
+    else:
+        url = CRW_BASE_URL.format(station_id=station_id)
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        raw_lines = resp.text.splitlines(keepends=True)
+        with open(cache_path, "w") as f:
+            f.writelines(raw_lines)
+
+    meta = parse_crw_header(raw_lines)
+    data_start = meta["data_start_line"]
+
+    data_text = "".join(raw_lines[data_start:])
+    df = pd.read_csv(
+        StringIO(data_text),
+        sep=r"\s+",
+        na_values=["-999", "-9999", "-99.0000"],
+    )
+
+    df["date"] = pd.to_datetime(
+        df["YYYY"].astype(str) + "-" +
+        df["MM"].astype(str).str.zfill(2) + "-" +
+        df["DD"].astype(str).str.zfill(2)
+    )
+
+    df.rename(columns={
+        "SST@90th_HS":        "sst",
+        "SSTA@90th_HS":       "sst_anom",
+        "90th_HS>0":          "hotspot",
+        "DHW_from_90th_HS>1": "dhw",
+        "BAA_7day_max":       "alert",
+    }, inplace=True)
+
+    df["site"] = site_name
+    df["mmm"]  = meta.get("mmm", None)
+
+    keep = ["date", "sst", "sst_anom", "hotspot", "dhw", "alert", "site", "mmm"]
+    df = df[[c for c in keep if c in df.columns]]
+    df.sort_values("date", inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    return df
+
+
+def fetch_2026_ytd(site_name, station_id):
+    """Fetch full station history, filter to 2026 YTD, always hits NOAA live."""
+    df = fetch_crw_station(site_name, station_id, force_refresh=True)
+    if df is None:
+        return None
+    mask = df["date"].dt.year == 2026
+    sub = df[mask].copy()
+    return sub if len(sub) > 0 else None
+
+
+def fetch_oni():
+    """
+    Fetch NOAA CPC Oceanic Nino Index (ONI) data.
+
+    Format: fixed-width text, columns SEAS YR TOTAL ANOM.
+    SEAS is a 3-month season label (e.g. JFM, FMA, ..., DJF).
+    ANOM is the SST anomaly in the Nino 3.4 region in deg C.
+    We assign each season to the middle month for plotting.
+    """
+    SEASON_TO_MONTH = {
+        "DJF": 1, "JFM": 2, "FMA": 3, "MAM": 4,
+        "AMJ": 5, "MJJ": 6, "JJA": 7, "JAS": 8,
+        "ASO": 9, "SON": 10, "OND": 11, "NDJ": 12,
+    }
+    resp = requests.get(ONI_URL, timeout=30)
+    resp.raise_for_status()
+    rows = []
+    for line in resp.text.splitlines():
+        parts = line.split()
+        if len(parts) < 4 or parts[0] == "SEAS":
+            continue
+        try:
+            seas  = parts[0]
+            yr    = int(parts[1])
+            anom  = float(parts[3])
+            month = SEASON_TO_MONTH.get(seas)
+            if month is None:
+                continue
+            rows.append({"year": yr, "month": month, "oni": anom})
+        except ValueError:
+            continue
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(
+        df["year"].astype(str) + "-" +
+        df["month"].astype(str).str.zfill(2) + "-01"
+    )
+    df.sort_values("date", inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    return df
+```
+
+## Overview
+
+When I finished the [first project](bleaching-risk-notebook.html) — a historical analysis of coral bleaching risk using NOAA Coral Reef Watch DHW data — I had a natural next question. The historical record is clarifying: it shows what happened, when, and where. But coral bleaching is not a historical problem. It is happening right now, and 2026 is shaping up to be another year worth watching closely.
+
+This project is the natural next step. Same data source. Same parser. I included the same five sites from the bleaching analysis, plus two additional Indo-Pacific sites — Palau and West Papua (Raja Ampat) — centered in the El Nino pattern. The difference is that instead of asking *what happened during past bleaching events*, I want to ask *what is happening right now*.
+
+Think of it less as a finished analysis and more as a live instrument — the kind of thing a reef manager might bookmark and check weekly.
+
+I am a data scientist learning marine science, not a coral ecologist. Everything here is derived from NOAA's publicly available monitoring products, and I have linked the authoritative sources throughout. My goal is to read the data clearly and communicate it honestly.
+
+::: {.callout-note}
+This page re-executes via daily GitHub Actions cron at 06:00 UTC. Data are fetched live from NOAA CRW on every render. Values shown reflect conditions as of the timestamp above.
+:::
+
+---
+
+## Study sites
+
+This project monitors **seven reef sites** across two ocean basins — five Caribbean/Atlantic
+sites from the original bleaching project, plus two Indo-Pacific sites added to capture
+the western Pacific warm pool, which historically leads global bleaching events during
+El Nino years.
+
+| Site | Ocean basin | Lat | Lon | Why it's here |
+|------|-------------|-----|-----|---------------|
+| Florida Keys | Caribbean/Atlantic | 24.55°N | 81.50°W | U.S. reef system; personal dive site; well-documented bleaching history |
+| Cayman Islands | Caribbean | 19.30°N | 81.38°W | Personal dive site; isolated mid-Caribbean benchmark |
+| Honduras (Bay Islands) | Caribbean | 16.32°N | 86.55°W | Roatan; Mesoamerican Reef; personal dive site |
+| ABC Islands (Bonaire) | Caribbean | 12.15°N | 68.28°W | Southern Caribbean; marine park; strong conservation baseline |
+| Great Barrier Reef (Central) | Indo-Pacific | 18.00°S | 147.00°E | Central sector (Whitsundays/Townsville); most studied; severely impacted in 2016 and 2022. NOAA CRW splits the GBR into five station sectors — Central chosen as representative. |
+| Palau | Indo-Pacific | 7.50°N | 134.50°E | Western Pacific warm pool; globally significant biodiversity hotspot |
+| West Papua (Raja Ampat) | Indo-Pacific | 1.50°S | 132.00°E | Bird's Head Seascape; highest coral diversity on Earth |
+
+Data source: NOAA Coral Reef Watch Virtual Station network, 5 km resolution, v3.1 product
+suite. Each station reports daily composites of SST, SST Anomaly, HotSpot, and DHW.
+Station IDs were verified directly against the live NOAA CRW Virtual Station list at
+[coralreefwatch.noaa.gov/product/vs/data.php](https://coralreefwatch.noaa.gov/product/vs/data.php)
+before any data was fetched.
+
+---
+
+## A note on the data pipeline
+
+The first project deliberately kept implementation details in the background —
+the focus there was on the science, and a long digression on file parsing
+would have broken that flow. But since this project extends the same pipeline
+to a live monitoring context, it feels like the right moment to pull back the
+curtain a bit.
+
+One of the more satisfying parts of building this project was writing a parser
+for NOAA CRW's Virtual Station file format — and I'll be honest: this was
+Claude's contribution more than mine. My background is in structured clinical
+data — HL7 messages, FHIR resources, JSON pipelines — where the schema is
+always explicit, the delimiter is never ambiguous, and a malformed record
+throws a validation error before it ever reaches your code. The CRW format is
+a different animal entirely.
+
+The files are plain-text, with a free-form prose header that looks like this:
+
+```
+Name:
+Florida Keys
+...
+Averaged Maximum Monthly Mean:
+28.36
+...
+YYYY MM DD SST_MIN SST_MAX SST@90th_HS SSTA@90th_HS 90th_HS>0 DHW_from_90th_HS>1 BAA_7day_max
+2000 12 25  27.01   27.45   27.12        -1.24         0.00      0.00               0
+```
+
+No `#` comment markers. No separator line between header and data. Column
+names with `@`, `>`, and `%` characters that pandas will misread without
+explicit handling. The MMM value — the thermal baseline that the entire alert
+system is built on — is sitting two lines below a plain-text label, with no
+key-value structure to anchor it.
+
+`parse_crw_header()` handles this by scanning the raw lines one at a time,
+looking for two sentinel strings: `"Averaged Maximum Monthly Mean:"` tells it
+the next line is the MMM float, and `"YYYY MM DD"` marks the exact line where
+the data table begins. That line index gets passed to `pd.read_csv()` via
+`StringIO`, so pandas never sees the header at all — it reads only the
+structured portion of the file.
+
+The date column requires one more fix. The data table stores date as three
+separate integer columns — `YYYY`, `MM`, `DD` — which is common in older
+scientific datasets. The safest reconstruction is string concatenation with
+`str.zfill(2)` to zero-pad single-digit months and days before passing to
+`pd.to_datetime()`. Skipping the zero-padding produces silent failures on
+dates like January 5th (`2026-1-5` parses inconsistently across pandas
+versions; `2026-01-05` does not).
+
+Finally, `fetch_crw_station()` renames the v3.1 column names —
+`DHW_from_90th_HS>1`, `SSTA@90th_HS`, `BAA_7day_max` — to readable aliases
+(`dhw`, `sst_anom`, `alert`) and carries the MMM value through as a
+site-level column, so every row in the output DataFrame knows its own thermal
+baseline. That makes the alert classification logic in `dhw_to_alert()`
+self-contained and easy to audit.
+
+This parser is carried over directly from the first project with two small
+changes: the cache now stores the raw `.txt` file rather than a parsed CSV
+(preserving the original header and MMM value across sessions), and the
+`sst_anomaly` column alias from the bleaching project is shortened to
+`sst_anom` here for consistency with the status table and plot code.
+
+Output directories are anchored to the project root rather than using bare
+relative paths, so the cache and figure outputs from this project stay
+isolated from the bleaching project even if both kernels are running
+simultaneously.
+
+---
+
+```{python}
+fetch_stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+```
+
+## Quick status — `{python} fetch_stamp`
+
+```{python}
+# =============================================================================
+# Cell 4 -- Fetch 2026 YTD data for all seven sites
+# =============================================================================
+
+site_data   = {}
+site_errors = []
+
+for name, cfg in STATIONS.items():
+    try:
+        df = fetch_2026_ytd(name, cfg["station_id"])
+        if df is not None and len(df) > 0:
+            site_data[name] = df
+        else:
+            site_errors.append(name)
+    except Exception:
+        site_errors.append(name)
+```
+
+```{python}
+# =============================================================================
+# Cell 5 -- Current thermal stress status table
+# =============================================================================
+rows = []
+for name, df in site_data.items():
+    last = df.iloc[-1]
+    alert = dhw_to_alert(last["dhw"])
+    rows.append({
+        "Site":              name,
+        "Ocean basin":       STATIONS[name]["ocean"],
+        "Latest date":       last["date"].strftime("%Y-%m-%d"),
+        "SST (°C)":          f"{last['sst']:.2f}"       if pd.notna(last["sst"])      else "—",
+        "SST anomaly (°C)":  f"{last['sst_anom']:+.2f}" if pd.notna(last["sst_anom"]) else "—",
+        "DHW (°C-wk)":       f"{last['dhw']:.1f}"       if pd.notna(last["dhw"])      else "—",
+        "Alert level":       alert,
+    })
+
+for name in site_errors:
+    rows.append({
+        "Site":             name,
+        "Ocean basin":      STATIONS[name]["ocean"],
+        "Latest date":      "—",
+        "SST (°C)":         "—",
+        "SST anomaly (°C)": "—",
+        "DHW (°C-wk)":      "—",
+        "Alert level":      "Data unavailable",
+    })
+
+status_df = pd.DataFrame(rows)
+
+def color_alert(val):
+    color_map = {
+        "No Stress":         "background-color: #BBDEFB; color: #0D47A1",
+        "Bleaching Watch":   "background-color: #FFF9C4; color: #F57F17",
+        "Bleaching Warning": "background-color: #FFE0B2; color: #E65100",
+        "Alert Level 1":     "background-color: #FFCDD2; color: #B71C1C",
+        "Alert Level 2":     "background-color: #E1BEE7; color: #4A148C",
+        "Alert Level 3":     "background-color: #880E4F; color: #FFFFFF",
+        "Alert Level 4":     "background-color: #4A0000; color: #FFFFFF",
+        "Alert Level 5":     "background-color: #000000; color: #FFFFFF",
+        "Data unavailable":  "background-color: #EEEEEE; color: #757575",
+    }
+    return color_map.get(val, "")
+
+styled = (
+    status_df.style
+    .map(color_alert, subset=["Alert level"])
+    .set_properties(**{"text-align": "center"}, subset=status_df.columns[1:])
+    .set_properties(**{"font-weight": "bold"}, subset=["Site", "Alert level"])
+    .hide(axis="index")
+)
+styled
+```
+
+**How to read this table:** DHW (Degree Heating Weeks) accumulates thermal stress over a
+rolling 84-day window. The NOAA CRW 5-level alert system (expanded December 2023):
+Watch < 4, Warning < 8, Alert Level 1 < 12, Alert Level 2 < 16, Alert Level 3 < 20,
+Alert Level 4 < 24, Alert Level 5 >= 24 °C-weeks. Values above 8 °C-weeks are strongly
+associated with mass bleaching; values above 16 represent conditions with limited
+historical precedent at most sites.
+
+---
+
+## 2026 DHW time series
+
+```{python}
+# =============================================================================
+# Cell 6 -- DHW time series panel plot
+# =============================================================================
+sites_to_plot = list(site_data.keys())
+n = len(sites_to_plot)
+
+if n == 0:
+    print("No data to plot.")
+else:
+    ncols = 2
+    nrows = (n + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(14, nrows * 3.2),
+                             sharey=False, constrained_layout=True)
+    axes_flat = axes.flat if n > 1 else [axes]
+
+    alert_bands = [
+        (0,  4,  "#FFF9C4", "Watch"),
+        (4,  8,  "#FFE0B2", "Warning"),
+        (8,  12, "#FFCDD2", "Alert 1"),
+        (12, 16, "#E1BEE7", "Alert 2"),
+        (16, 20, "#F8BBD9", "Alert 3"),
+        (20, 24, "#FFCCBC", "Alert 4"),
+    ]
+
+    for ax, name in zip(axes_flat, sites_to_plot):
+        df = site_data[name]
+        ax.plot(df["date"], df["dhw"], color="#1565C0", linewidth=1.8, zorder=3)
+
+        ymax = max(df["dhw"].max() * 1.15, 10)
+        for ylo, yhi, color, _ in alert_bands:
+            ax.axhspan(ylo, min(yhi, ymax), color=color, alpha=0.45, zorder=0)
+        if df["dhw"].max() >= 24:
+            ax.axhspan(24, ymax, color="#CFD8DC", alpha=0.35, zorder=0)
+
+        for thresh, label in [(4, "Warn"), (8, "L1"), (12, "L2"),
+                               (16, "L3"), (20, "L4"), (24, "L5")]:
+            if thresh <= ymax:
+                ax.axhline(thresh, color="gray", linewidth=0.6,
+                           linestyle="--", zorder=2)
+                ax.text(df["date"].min(), thresh + 0.2, label,
+                        fontsize=7, color="gray", va="bottom")
+
+        ax.set_title(name, fontsize=10, fontweight="bold", pad=4)
+        ax.set_xlabel("")
+        ax.set_ylabel("DHW (°C-wk)", fontsize=8)
+        ax.set_ylim(0, ymax)
+        ax.tick_params(axis="x", labelsize=7, rotation=30)
+        ax.tick_params(axis="y", labelsize=8)
+
+    for i in range(n, nrows * ncols):
+        axes.flat[i].set_visible(False)
+
+    legend_handles = [
+        mpatches.Patch(color="#FFF9C4", label="Watch (0-4 °C-wk)"),
+        mpatches.Patch(color="#FFE0B2", label="Warning (4-8)"),
+        mpatches.Patch(color="#FFCDD2", label="Alert 1 (8-12)"),
+        mpatches.Patch(color="#E1BEE7", label="Alert 2 (12-16)"),
+        mpatches.Patch(color="#F8BBD9", label="Alert 3 (16-20)"),
+        mpatches.Patch(color="#FFCCBC", label="Alert 4 (20-24)"),
+        mpatches.Patch(color="#CFD8DC", label="Alert 5 (>=24)"),
+    ]
+    fig.legend(handles=legend_handles, loc="lower center", ncol=4,
+               bbox_to_anchor=(0.5, -0.04), fontsize=8.5, framealpha=0.9)
+
+    fig.suptitle(f"2026 YTD Degree Heating Weeks — 7 Reef Sites\n"
+                 f"NOAA Coral Reef Watch v3.1  |  as of {fetch_stamp}",
+                 fontsize=11, y=1.01)
+
+    plt.savefig(OUTPUT_DIR / "dhw_panel_2026.png", dpi=150, bbox_inches="tight")
+    plt.show()
+```
+
+---
+
+## Latest SST anomaly by site
+
+```{python}
+# =============================================================================
+# Cell 7 -- SST anomaly bar chart
+# =============================================================================
+if len(site_data) == 0:
+    print("No data to plot.")
+else:
+    latest_rows = []
+    for name, df in site_data.items():
+        last = df.iloc[-1]
+        latest_rows.append({
+            "site":     name,
+            "ocean":    STATIONS[name]["ocean"],
+            "sst_anom": last["sst_anom"],
+            "date":     last["date"].strftime("%Y-%m-%d"),
+        })
+    latest_df = pd.DataFrame(latest_rows).sort_values("sst_anom", ascending=True)
+
+    colors = ["#EF5350" if v >= 0 else "#42A5F5"
+              for v in latest_df["sst_anom"]]
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    bars = ax.barh(latest_df["site"], latest_df["sst_anom"],
+                   color=colors, edgecolor="white", linewidth=0.5)
+
+    ax.axvline(0, color="black", linewidth=0.8, linestyle="-")
+    ax.axvline(1, color="#FF7043", linewidth=0.8, linestyle="--",
+               label="Bleaching threshold (+1°C above MMM)")
+
+    for bar, val in zip(bars, latest_df["sst_anom"]):
+        offset = 0.03 if val >= 0 else -0.03
+        ha = "left" if val >= 0 else "right"
+        ax.text(val + offset, bar.get_y() + bar.get_height() / 2,
+                f"{val:+.2f}°C", va="center", ha=ha, fontsize=8.5)
+
+    ax.set_xlabel("SST Anomaly (°C)", fontsize=10)
+    ax.set_title(f"Latest SST Anomaly by Site — {fetch_stamp}\n"
+                 f"NOAA Coral Reef Watch v3.1",
+                 fontsize=11)
+    ax.legend(fontsize=9, loc="lower right")
+    ax.grid(axis="x", linestyle=":", alpha=0.4)
+
+    for label in ax.get_yticklabels():
+        name = label.get_text()
+        if name in STATIONS:
+            ocean = STATIONS[name]["ocean"]
+            label.set_color("#1B5E20" if "Indo" in ocean else "#0D47A1")
+
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "sst_anom_bar_2026.png", dpi=150, bbox_inches="tight")
+    plt.show()
+```
+
+---
+
+## El Niño progression and reef thermal stress
+
+The anomalies in the chart above are not random variation — this project is
+called "2026 Super El Nino Watch" for a reason. The working hypothesis from
+the start has been that an active or developing El Nino event is driving
+elevated SSTs across our monitoring sites. What we haven't done yet is show
+that directly.
+
+It's worth being explicit about this: starting with a hypothesis and then
+looking for supporting evidence is not the same as falsifying it. The honest
+next step is to bring in an independent measure of El Nino progression and ask
+whether the pattern we're seeing at the reefs actually tracks it — and whether
+it doesn't track it anywhere, which would be equally informative.
+
+This is where the Oceanic Nino Index (ONI) comes in. The ONI is NOAA's
+official metric for declaring and tracking El Nino and La Nina events. It
+measures SST anomalies in the Nino 3.4 region — a patch of the central
+equatorial Pacific that acts as the primary engine of ENSO variability. When
+the ONI stays at or above +0.5°C for five consecutive overlapping 3-month
+periods, NOAA officially declares an El Nino. I'm pretty sure I learned this
+in high school earth science — but I checked.
+
+To be clear: the physical mechanism linking El Nino to coral bleaching is not
+in question, and I want to be honest about how I know that — I am not a marine
+scientist. It just seemed like a no-brainer from the data, so I did a
+literature search and read some abstracts. It turns out the causal chain is
+well established and has been for decades.
+
+The 1998 global bleaching event, which killed an estimated 16% of the world's
+coral reefs, coincided with one of the strongest El Nino events on record. The
+mechanism is documented: El Nino suppresses equatorial upwelling, reduces
+cloud cover, and drives anomalously warm surface waters across the Indo-Pacific
+warm pool, creating conditions for prolonged thermal stress to accumulate into
+dangerous DHW values. Hoegh-Guldberg (1999) formalized much of this.
+Hughes et al. (2017, 2018) documented it in devastating detail for the Great
+Barrier Reef during the 2016 event — back-to-back mass bleaching on a scale
+that had no historical precedent. The Caribbean connection is less direct
+mechanistically but is also documented; Eakin et al. (2010) covers the 2005
+Caribbean bleaching event, which was the worst on record at the time.
+
+I'll be transparent about the limitation here: correlation between ONI and
+DHW by basin is suggestive at best. I'm married to an economist, and I would
+be remiss if I didn't address the correlation-causation issue at hand.
+
+She would probably start by pointing out that what we have here is a
+two-variable time series plot with no controls, no lag structure, and a sample
+size of one El Nino event. That's not a finding — that's a hypothesis. To do
+this properly she'd suggest something along the lines of:
+
+- **Distributed lag models** — the effect of ONI on reef SST anomalies isn't
+  instantaneous; it propagates over weeks to months depending on the basin.
+  A proper analysis would test a range of lags (4, 8, 12 weeks) and report
+  which lag structure best fits the data at each site.
+- **Basin-separated regressions** — ENSO affects each basin through different
+  mechanisms and on different timescales. She'd run them separately.
+- **Robustness checks** — does the correlation hold if you drop the Florida
+  Keys outlier? Does it hold across previous El Nino years in the historical
+  record? If the relationship falls apart when you remove one site or one
+  year, it isn't robust.
+- **Granger causality** — does ONI actually help predict future DHW values,
+  or are they just moving together for unrelated reasons? A Granger test
+  wouldn't establish physical causation but would at least tell us whether
+  the ONI signal has predictive value for reef stress.
+
+This came up at dinner. She's right. This is a monitoring dashboard, not a
+causal study, and the chart below should be read as a visual sanity check
+against a known climate driver — not as evidence of a causal relationship.
+A rigorous treatment is on the list for a future version of this project.
+
+One more honest note: I started this project because I dive these reefs and
+care about what happens to them. The Florida Keys anomaly, West Papua already
+carrying DHW, all seven sites at Bleaching Watch before summer even starts in
+the Northern Hemisphere — I know what that pattern looked like in 2023 and
+2016. I'm prepared for some serious heartbreak this summer. I hope I'm wrong.
+
+One data note worth flagging: the ONI is published with a lag of one to two
+months by NOAA's Climate Prediction Center. The most recent bar in the chart
+below may not reflect current conditions. For the most current ENSO status,
+NOAA CPC publishes weekly updates at
+<https://www.cpc.ncep.noaa.gov/products/analysis_monitoring/enso_advisory/index.shtml>.
+This lag also explains why the ONI bars may end earlier than the DHW lines —
+the CRW v3.1 Virtual Station data is updated daily, making it considerably
+more current than the ONI's monthly publication schedule.
+
+```{python}
+# =============================================================================
+# Cell 8 -- ONI vs basin-mean DHW
+# =============================================================================
+
+# Fetch ONI
+oni_df   = fetch_oni()
+oni_2026 = oni_df[oni_df["date"].dt.year == 2026].copy()
+if len(oni_2026) == 0:
+    oni_2026 = oni_df.tail(12).copy()
+
+# Basin-separated mean DHW
+caribbean_sites   = [n for n, cfg in STATIONS.items() if "Caribbean" in cfg["ocean"]]
+indopacific_sites = [n for n, cfg in STATIONS.items() if "Indo-Pacific" in cfg["ocean"]]
+
+def basin_mean_dhw(site_list):
+    frames = [site_data[n] for n in site_list if n in site_data]
+    if not frames:
+        return pd.DataFrame(columns=["date", "mean_dhw"])
+    return (
+        pd.concat(frames)
+        .groupby("date")["dhw"]
+        .mean()
+        .reset_index()
+        .rename(columns={"dhw": "mean_dhw"})
+        .loc[lambda d: d["date"].dt.year == 2026]
+        .copy()
+    )
+
+caribbean_dhw   = basin_mean_dhw(caribbean_sites)
+indopacific_dhw = basin_mean_dhw(indopacific_sites)
+
+# Plot
+fig, ax1 = plt.subplots(figsize=(12, 5))
+
+bar_colors = ["#EF5350" if v >= 0 else "#42A5F5" for v in oni_2026["oni"]]
+ax1.bar(oni_2026["date"], oni_2026["oni"], width=25,
+        color=bar_colors, alpha=0.6, zorder=2, label="ONI (deg C)")
+ax1.axhline(0,    color="black",   linewidth=0.8, linestyle="-")
+ax1.axhline(0.5,  color="#FF7043", linewidth=0.8, linestyle="--",
+            label="El Nino threshold (+0.5 deg C)")
+ax1.axhline(1.5,  color="#B71C1C", linewidth=0.8, linestyle=":",
+            label="Strong El Nino (+1.5 deg C)")
+ax1.axhline(-0.5, color="#1565C0", linewidth=0.8, linestyle="--",
+            label="La Nina threshold (-0.5 deg C)")
+ax1.set_ylabel("Oceanic Nino Index (deg C)", fontsize=10, color="#424242")
+ax1.tick_params(axis="y", labelcolor="#424242")
+ax1.set_ylim(-2.5, 3.5)
+
+ax2 = ax1.twinx()
+ax2.plot(caribbean_dhw["date"], caribbean_dhw["mean_dhw"],
+         color="#0D47A1", linewidth=2.2, zorder=3,
+         label="Mean DHW -- Caribbean sites (deg C-wk)")
+ax2.fill_between(caribbean_dhw["date"], caribbean_dhw["mean_dhw"],
+                 alpha=0.12, color="#0D47A1")
+ax2.plot(indopacific_dhw["date"], indopacific_dhw["mean_dhw"],
+         color="#1B5E20", linewidth=2.2, zorder=3,
+         label="Mean DHW -- Indo-Pacific sites (deg C-wk)")
+ax2.fill_between(indopacific_dhw["date"], indopacific_dhw["mean_dhw"],
+                 alpha=0.12, color="#1B5E20")
+ax2.set_ylabel("Mean DHW by basin (deg C-wk)", fontsize=10, color="#424242")
+ax2.tick_params(axis="y", labelcolor="#424242")
+ax2.set_ylim(0, max(
+    caribbean_dhw["mean_dhw"].max() if len(caribbean_dhw) > 0 else 0,
+    indopacific_dhw["mean_dhw"].max() if len(indopacific_dhw) > 0 else 0
+) * 2.2 or 8)
+
+lines1, labels1 = ax1.get_legend_handles_labels()
+lines2, labels2 = ax2.get_legend_handles_labels()
+ax1.legend(lines1 + lines2, labels1 + labels2,
+           loc="upper left", fontsize=8.5, framealpha=0.9)
+
+ax1.set_xlabel("")
+ax1.tick_params(axis="x", labelsize=8, rotation=30)
+fig.suptitle(
+    f"Oceanic Nino Index vs. Mean Reef DHW by Basin -- 2026 YTD\n"
+    f"ONI source: NOAA Climate Prediction Center  |  "
+    f"DHW: NOAA Coral Reef Watch v3.1  |  as of {fetch_stamp}",
+    fontsize=10
+)
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "oni_vs_dhw_2026.png", dpi=150, bbox_inches="tight")
+plt.show()
+```
+
+The chart above is worth reading carefully. The Indo-Pacific DHW peak in
+January-February reflects the Southern Hemisphere summer ending at GBR Central
+and West Papua — not a response to El Nino onset. The ONI transition from
+negative to positive in March-April is the signal to watch. If that positive
+ONI value holds and strengthens through Northern Hemisphere summer, the
+Caribbean sites — currently at DHW zero but with anomalies already well above
+the bleaching threshold — are the ones most at risk for rapid stress
+accumulation. Check back in July.
+
+---
+
+## Interpretation & limitations
+
+The data as of mid-2026 tells a consistent story: every reef system in
+this analysis is already running above its historical thermal baseline, and
+two Indo-Pacific sites are carrying residual heat stress from a Southern
+Hemisphere summer that just ended. The ONI has crossed into positive
+territory. Northern Hemisphere bleaching season has not yet begun.
+
+That combination — anomalies already elevated, ONI turning positive, DHW
+near zero but primed — is consistent with the early-season setup observed
+before the 2015-2016 and 2023 bleaching events. Whether it follows the same
+trajectory depends on how the ONI evolves over the next 60-90 days and
+whether atmospheric conditions allow that heat to accumulate at the reef
+surface rather than being mixed away.
+
+A few honest limitations to keep in mind when reading this page:
+
+**Spatial resolution.** The CRW v3.1 Virtual Station data is derived from a
+5 km satellite product. That is a significant improvement over the legacy
+50 km product, but it is still a regional average. Conditions at a specific
+reef within that pixel may differ meaningfully from what the satellite measures.
+
+**Single pixel per site.** Each site in this analysis is represented by one
+Virtual Station — one pixel. The Great Barrier Reef alone spans 2,300 km.
+GBR Central is a reasonable representative but it is not the whole reef.
+
+**SST is not the whole story.** DHW measures surface thermal stress. It does
+not capture light intensity, water clarity, local acidification, prior
+bleaching history, or the adaptive capacity of individual coral populations.
+Two reefs with identical DHW values can have very different bleaching
+outcomes depending on their ecological condition and thermal history.
+
+**This is not a forecast.** Nothing in this notebook predicts what will
+happen. It describes current conditions and flags patterns that, based on
+historical precedent, warrant attention.
+
+**The ONI correlation is suggestive, not causal** at the site level. See the
+El Nino section above for the full treatment of this limitation.
+
+---
+
+## Future directions
+
+Building this notebook taught me something I did not fully anticipate going
+in. At some point while I was wrangling the CRW parser, figuring out why
+the GBR station ID was wrong, and trying to decide whether to pool Caribbean
+and Indo-Pacific DHW into the same mean — I realized this is just a data
+integration problem. Different sources, different schemas, different update
+frequencies, different levels of trust. You have to decide what to join on,
+how to handle missing data, and what the right unit of analysis is.
+
+That is my day job. I work in biomedical and clinical research informatics.
+I do this with HL7 messages and FHIR resources and clinical trial datasets.
+It turns out the problem is not unique to healthcare — a reef manager trying
+to assess bleaching risk at a site they are responsible for is facing exactly
+the same challenge, just with satellite products instead of EHR extracts.
+
+That realization is what makes the following feel less like a wish list and
+more like a natural next project.
+
+**Toward a multi-factor bleaching risk score:**
+
+A composite bleaching risk score that goes beyond DHW is not a new idea.
+NOAA CRW already publishes an experimental Four-Month Coral Bleaching
+Outlook (Liu et al., 2018), updated weekly, which forecasts the probability
+of bleaching-level heat stress using SST projections from NOAA's Climate
+Forecast System Version 2 (CFSv2) ensemble. It is the closest published
+analog to what I am describing here — but it is still purely thermal.
+It does not incorporate light stress, water quality, acidification, or
+ecological condition.
+
+There is also published work on taxon-specific Bleaching Response Indices
+that standardize susceptibility across coral species (Marshall & Baird,
+2000), and peer-reviewed evidence that bleaching predictions improve
+substantially when interannual SST variability and coral thermal history
+are included alongside raw DHW values (Thompson & Dolman, 2010).
+
+The gap this future direction targets is integrating those additional
+stressors into a site-level risk score that a reef manager could actually
+act on. The data streams that would need to come together:
+
+- **Photosynthetically active radiation (PAR)** — light intensity at the
+  reef surface compounds thermal stress significantly. NOAA CRW publishes
+  a satellite-derived PAR product that could be integrated directly into
+  the existing pipeline.
+- **Water clarity and turbidity** — MODIS and VIIRS ocean color products
+  provide estimates of chlorophyll concentration and diffuse attenuation
+  coefficient (Kd490), which serve as proxies for water clarity.
+- **Ocean acidification** — NOAA's Ocean Acidification Program publishes
+  aragonite saturation state estimates for tropical reef regions. Corals
+  under chronic acidification stress have reduced capacity to recover from
+  bleaching events, making acidification a risk multiplier rather than an
+  independent stressor.
+- **Prior bleaching history** — the NOAA CoRIS and ReefBase databases
+  contain georeferenced bleaching observation records that could be used
+  to construct a site-level bleaching history index.
+- **Thermal history and adaptive capacity** — there is growing evidence
+  that corals with prior exposure to variable thermal environments develop
+  greater heat tolerance. A rough proxy could be derived from the CoralTemp
+  historical record: reefs with high interannual SST variability over the
+  past two decades may harbor more thermally tolerant populations. This is
+  contested in the literature but tractable from data we already have.
+- **DHW trajectory** — the rate of DHW accumulation over the past two to
+  four weeks. A reef at 3 DHW-wk and climbing fast is at higher near-term
+  risk than a reef at 3 DHW-wk that has been stable for three weeks.
+- **In-water validation** — integrating citizen science reports from
+  CoralWatch, Reef Check, and NOAA's National Coral Reef Monitoring Program
+  would substantially improve ecological validity.
+
+From a data engineering standpoint this is a familiar problem: each of
+these sources has a different spatial resolution, a different update
+frequency, a different file format, and a different level of provenance
+documentation. Making them interoperable at the site level is exactly the
+kind of pipeline work this project is already doing in miniature — and
+exactly the kind of problem my background in clinical data integration is
+well suited to.
+
+**Other near-term directions:**
+
+- Add historical DHW context — overlay 2026 YTD against the same period
+  in 2015, 2016, and 2023 for each site
+- Basin-separated ONI regression with lag testing
+- Integrate NOAA's CFS-based Bleaching Outlook probabilities as a third
+  data source alongside the ONI and DHW
+- Expand to additional Indo-Pacific sites, particularly in the Coral Triangle
+
+**A personal note:** I built this project to learn, to practice working
+with real environmental data pipelines, and because I dive these reefs and
+care about what happens to them. If you are a reef scientist, conservation
+organization, or research program working in any of these regions and find
+this work interesting or useful, I would genuinely welcome the conversation.
+Contact information is on the About page.
+
+---
+
+## References
+
+- **Skirving, W., et al. (2020).** CoralTemp and the Coral Reef Watch Coral Bleaching Heat Stress Product Suite Version 3.1. *Remote Sensing*, 12(23), 3856. <https://doi.org/10.3390/rs12233856>
+
+- **Liu, G., et al. (2013).** NOAA Coral Reef Watch's Decision Support System for Coral Bleaching Management. NOAA Technical Report NESDIS 143. <https://coralreefwatch.noaa.gov/satellite/publications/NESDIS_143.pdf>
+
+- **Liu, G., et al. (2018).** Predicting heat stress to inform reef management: NOAA Coral Reef Watch's 4-month coral bleaching outlook. *Frontiers in Marine Science*, 5, 57. <https://doi.org/10.3389/fmars.2018.00057>
+
+- **Hoegh-Guldberg, O. (1999).** Climate change, coral bleaching and the future of the world's coral reefs. *Marine and Freshwater Research*, 50(8), 839–866.
+
+- **Hughes, T.P., et al. (2017).** Global warming and recurrent mass bleaching of corals. *Nature*, 543, 373–377.
+
+- **Hughes, T.P., et al. (2018).** Global warming transforms coral reef assemblages. *Nature*, 556, 492–496.
+
+- **Eakin, C.M., et al. (2010).** Caribbean corals in crisis: record thermal stress, bleaching, and mortality in 2005. *PLOS ONE*, 5(11), e13969.
+
+- **Marshall, P.A. & Baird, A.H. (2000).** Bleaching of corals on the Great Barrier Reef: differential susceptibilities among taxa. *Coral Reefs*, 19, 155–163.
+
+- **NOAA Climate Prediction Center.** Oceanic Nino Index. <https://www.cpc.ncep.noaa.gov/data/indices/oni.ascii.txt>
+
+- **NOAA (2024).** NOAA confirms 4th global coral bleaching event. <https://www.noaa.gov/news/noaa-confirms-4th-global-coral-bleaching-event>
+
+---
+
+## See also
+
+- [Project 1: Historical coral bleaching risk analysis using NOAA CRW DHW data](bleaching-risk-notebook.html)
+- [NOAA CRW live monitoring portal](https://coralreefwatch.noaa.gov/product/vs/index.php)
+- [NOAA CPC ENSO advisory](https://www.cpc.ncep.noaa.gov/products/analysis_monitoring/enso_advisory/index.shtml)
+
+---
+
+*Page last rendered: `{python} fetch_stamp`. Data fetched live from NOAA CRW — values update with each site deployment. This page is part of a portfolio project at [velezf.github.io](https://velezf.github.io); it is not an official NOAA product.*
