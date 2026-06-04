@@ -1,73 +1,118 @@
-# el-nino-watch-2026
+# Monitoring 2026 Super El Niño Reef Thermal Stress
 
-This is the dev/analysis environment behind two pages on my portfolio site,
-[velezf.github.io](https://velezf.github.io): a historical coral bleaching risk
-notebook and a live 2026 El Niño reef thermal-stress monitoring page. The
-deployed, canonical versions of both pages live in the `velezf.github.io` repo
-under `projects/`. The `.qmd` in this repo is a working copy and may lag the
-deployed one — if there's a discrepancy, the portfolio repo is the source of
-truth.
+A reproducible Python/Jupyter live-monitoring analysis of satellite-derived coral thermal stress metrics across seven reef systems, using live NOAA Coral Reef Watch (CRW) Degree Heating Weeks (DHW) data and NOAA CPC Oceanic Niño Index (ONI) context.
 
-I'm a data scientist learning marine science, not a coral ecologist. Everything
-here is derived from NOAA's publicly available monitoring products. The El Niño
-monitoring page in particular is a live instrument, not a forecast or a finished
-analysis — think of it as the kind of thing a reef manager might bookmark and
-check weekly.
+**Portfolio project page:** [velezf.github.io/projects/el-nino-watch-2026.html](https://velezf.github.io/projects/el-nino-watch-2026.html)
 
-## What's here
+---
 
-- `coral_bleaching_dhw_analysis.ipynb` — Project 1 dev notebook: historical
-  bleaching risk analysis using NOAA CRW DHW data across five Caribbean/Atlantic
-  reef sites.
-- `el-nino-watch-2026-dev.ipynb` — Project 2 dev notebook: working scratchpad
-  for the live El Niño monitoring page.
-- `el-nino-watch-2026.qmd` — Working copy of the Quarto source for the
-  monitoring page. See note above about the portfolio repo being the source of
-  truth.
-- `references.bib` — Bibliography for both projects.
-- `pyproject.toml` / `uv.lock` — Fully specified Python environment (see below).
+## Study Sites
 
-The `data/` directory is not committed. It's created at run time and holds the
-raw NOAA cache files and processed figure outputs; they're regenerated on every
-render.
+| Site | Ocean |
+|------|-------|
+| Florida Keys, USA | Caribbean/Atlantic |
+| Grand Cayman | Caribbean |
+| Roatán, Honduras | Caribbean (Mesoamerican Reef) |
+| ABC Islands (Bonaire/Aruba/Curaçao) | Southern Caribbean |
+| Great Barrier Reef (Central sector) | Indo-Pacific |
+| Palau | Western Pacific |
+| West Papua | Coral Triangle |
 
-## Setup
+## Key Metrics Analyzed
 
-This project uses [uv](https://docs.astral.sh/uv/). Python 3.11 or later is
-required.
+- **DHW (Degree Heating Weeks)** — accumulated coral thermal stress (°C-weeks)
+- **SST Anomaly** — departure from daily climatological SST
+- **HotSpot** — SST departure above the Maximum Monthly Mean (bleaching threshold baseline)
+- **Bleaching Alert Levels** — NOAA CRW 5-level alert classification
+- **ONI (Oceanic Niño Index)** — SST anomaly in the Niño 3.4 region; El Niño/La Niña tracking metric
+
+## Data Sources
+
+NOAA Coral Reef Watch Version 3.1 Daily 5km Satellite Coral Bleaching Heat Stress Product Suite (CoralTemp). Updated daily. Available at: https://coralreefwatch.noaa.gov/
+
+NOAA Climate Prediction Center Oceanic Niño Index (ONI). Available at: https://www.cpc.ncep.noaa.gov/
+
+Both sources are fetched live via the CRW Virtual Station feed (space-delimited `.txt` files) and cached locally in `data/raw/` on first run.
+
+---
+
+## Quickstart
+
+**Prerequisites:** [uv](https://docs.astral.sh/uv/) and Python 3.11.
+
+### 1. Clone the repo
+
+```bash
+git clone https://github.com/velezf/el-nino-watch-2026.git
+cd el-nino-watch-2026
+```
+
+### 2. Set up the environment
 
 ```bash
 uv sync
 ```
 
-To register the Jupyter kernel used by the notebooks and the Quarto document:
+### 3. Register the Jupyter kernel
 
 ```bash
-uv run python -m ipykernel install --user --name el-nino-2026 --display-name "el-nino-2026"
+uv run python -m ipykernel install --user --name el-nino-2026
 ```
 
-To open the notebooks:
+### 4. Open the dev notebooks
 
 ```bash
 uv run jupyter lab
 ```
 
-## Data sources
+On first run, the notebooks fetch live data from NOAA CRW and NOAA CPC and cache the raw `.txt` files to `data/raw/`. Subsequent runs use the cache. To force a fresh download: set `force_refresh=True` in the fetch call.
 
-**NOAA Coral Reef Watch Virtual Stations** — 5 km resolution, v3.1 product
-suite. Daily composites of SST, SST Anomaly, HotSpot, and Degree Heating Weeks
-(DHW) for each monitored reef site.
-<https://coralreefwatch.noaa.gov/product/vs/data.php>
+### 5. View the Quarto portfolio page (optional)
 
-**NOAA CPC Oceanic Niño Index (ONI)** — NOAA's official metric for tracking
-El Niño and La Niña events, measuring SST anomalies in the Niño 3.4 region.
-<https://www.cpc.ncep.noaa.gov/data/indices/oni.ascii.txt>
+The narrative Quarto page (`el-nino-watch-2026.qmd`) lives in the [velezf.github.io](https://github.com/velezf/velezf.github.io) site repo under `projects/`, where it is rendered and deployed. It is intentionally not tracked here — this repo holds the analysis notebooks. The rendered page is published at the portfolio link above.
 
-Both sources are fetched live at render time and cached under `data/raw/`.
+---
 
-## Live pages
+## Repository Structure
 
-- [Coral Bleaching Risk — Historical Analysis](https://velezf.github.io/projects/bleaching-risk-notebook.html)
-- [2026 Super El Niño Watch — Live Monitoring](https://velezf.github.io/projects/el-nino-watch-2026.html)
+```
+el-nino-watch-2026/
+├── README.md
+├── LICENSE
+├── .gitignore
+├── .python-version                            # Python 3.11 pin
+├── pyproject.toml                             # uv project config and dependencies
+├── uv.lock                                    # Pinned dependency lock file
+├── coral_bleaching_dhw_analysis.ipynb         # Dev notebook — historical bleaching risk (Project 1)
+├── el-nino-watch-2026-dev.ipynb               # Dev notebook — live El Niño monitoring (Project 2)
+├── references.bib                             # BibTeX citations for both projects
+│
+└── data/                                      # Generated at run time — not committed
+    ├── raw/                                   # NOAA CRW & ONI .txt files — fetched on first run
+    └── processed/                             # Figure outputs — regenerated on every render
+```
 
-This is a portfolio learning project. It is not an official NOAA product.
+> The Quarto page (`el-nino-watch-2026.qmd`, `_quarto.yml`) and rendered outputs are
+> gitignored; they live in the site repo or local working directory only.
+
+---
+
+## Key References
+
+1. Skirving, W., et al. (2020). CoralTemp and the Coral Reef Watch Coral Bleaching Heat Stress Product Suite Version 3.1. *Remote Sensing, 12*(23), 3856. https://doi.org/10.3390/rs12233856
+
+2. NOAA Climate Prediction Center. (2026). Oceanic Niño Index (ONI). https://www.cpc.ncep.noaa.gov/data/indices/oni.ascii.txt
+
+3. Hughes, T.P., et al. (2017). Global warming and recurrent mass bleaching of corals. *Nature, 543*, 373–377.
+
+---
+
+## License
+
+Code: MIT License  
+Data: NOAA CRW and NOAA CPC data are public domain per NOAA's open data policy.
+
+---
+
+*Part of a marine science and environmental data science portfolio.*  
+*Built with Python · Jupyter · Quarto · NOAA Open Data*
