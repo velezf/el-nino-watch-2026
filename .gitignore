@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# uv / virtualenv
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Project data — NOAA cache and processed outputs are regenerated at run time
+data/
+
+# Quarto render outputs
+*.html
+*_files/
+/.quarto/
