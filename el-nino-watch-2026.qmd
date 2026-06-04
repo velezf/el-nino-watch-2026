@@ -28,6 +28,7 @@ format:
 # =============================================================================
 import os
 import pathlib
+import time
 from io import StringIO
 from datetime import datetime, timezone
 
@@ -211,37 +212,76 @@ def fetch_oni():
     SEAS is a 3-month season label (e.g. JFM, FMA, ..., DJF).
     ANOM is the SST anomaly in the Nino 3.4 region in deg C.
     We assign each season to the middle month for plotting.
+
+    Returns (df, source) where source is "live", "cache", or None.
+    Never raises — all network failures degrade gracefully to the
+    on-disk cache, and return (None, None) if no cache exists.
     """
     SEASON_TO_MONTH = {
         "DJF": 1, "JFM": 2, "FMA": 3, "MAM": 4,
         "AMJ": 5, "MJJ": 6, "JJA": 7, "JAS": 8,
         "ASO": 9, "SON": 10, "OND": 11, "NDJ": 12,
     }
-    resp = requests.get(ONI_URL, timeout=30)
-    resp.raise_for_status()
-    rows = []
-    for line in resp.text.splitlines():
-        parts = line.split()
-        if len(parts) < 4 or parts[0] == "SEAS":
-            continue
-        try:
-            seas  = parts[0]
-            yr    = int(parts[1])
-            anom  = float(parts[3])
-            month = SEASON_TO_MONTH.get(seas)
-            if month is None:
-                continue
-            rows.append({"year": yr, "month": month, "oni": anom})
-        except ValueError:
-            continue
-    df = pd.DataFrame(rows)
-    df["date"] = pd.to_datetime(
-        df["year"].astype(str) + "-" +
-        df["month"].astype(str).str.zfill(2) + "-01"
+    cache_path = CACHE_DIR / "oni.ascii.txt"
+    ua = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
     )
-    df.sort_values("date", inplace=True)
-    df.reset_index(drop=True, inplace=True)
-    return df
+
+    raw_text = None
+    for attempt in range(3):
+        try:
+            resp = requests.get(ONI_URL, timeout=30, headers={"User-Agent": ua})
+            if resp.status_code == 200:
+                raw_text = resp.text
+                break
+        except requests.RequestException:
+            pass
+        if attempt < 2:
+            time.sleep(2)
+
+    if raw_text is not None:
+        try:
+            cache_path.write_text(raw_text)
+        except OSError:
+            pass
+        source = "live"
+    elif cache_path.exists():
+        try:
+            raw_text = cache_path.read_text()
+            source = "cache"
+        except OSError:
+            return None, None
+    else:
+        return None, None
+
+    try:
+        rows = []
+        for line in raw_text.splitlines():
+            parts = line.split()
+            if len(parts) < 4 or parts[0] == "SEAS":
+                continue
+            try:
+                seas  = parts[0]
+                yr    = int(parts[1])
+                anom  = float(parts[3])
+                month = SEASON_TO_MONTH.get(seas)
+                if month is None:
+                    continue
+                rows.append({"year": yr, "month": month, "oni": anom})
+            except ValueError:
+                continue
+        df = pd.DataFrame(rows)
+        df["date"] = pd.to_datetime(
+            df["year"].astype(str) + "-" +
+            df["month"].astype(str).str.zfill(2) + "-01"
+        )
+        df.sort_values("date", inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        return df, source
+    except Exception:
+        return None, None
 ```
 
 ## Overview
@@ -667,11 +707,14 @@ more current than the ONI's monthly publication schedule.
 # Cell 8 -- ONI vs basin-mean DHW
 # =============================================================================
 
-# Fetch ONI
-oni_df   = fetch_oni()
-oni_2026 = oni_df[oni_df["date"].dt.year == 2026].copy()
-if len(oni_2026) == 0:
-    oni_2026 = oni_df.tail(12).copy()
+# Fetch ONI — returns (df, source) where source is "live", "cache", or None
+oni_df, oni_source = fetch_oni()
+if oni_df is not None:
+    oni_2026 = oni_df[oni_df["date"].dt.year == 2026].copy()
+    if len(oni_2026) == 0:
+        oni_2026 = oni_df.tail(12).copy()
+else:
+    oni_2026 = None
 
 # Basin-separated mean DHW
 caribbean_sites   = [n for n, cfg in STATIONS.items() if "Caribbean" in cfg["ocean"]]
@@ -697,19 +740,23 @@ indopacific_dhw = basin_mean_dhw(indopacific_sites)
 # Plot
 fig, ax1 = plt.subplots(figsize=(12, 5))
 
-bar_colors = ["#EF5350" if v >= 0 else "#42A5F5" for v in oni_2026["oni"]]
-ax1.bar(oni_2026["date"], oni_2026["oni"], width=25,
-        color=bar_colors, alpha=0.6, zorder=2, label="ONI (deg C)")
-ax1.axhline(0,    color="black",   linewidth=0.8, linestyle="-")
-ax1.axhline(0.5,  color="#FF7043", linewidth=0.8, linestyle="--",
-            label="El Nino threshold (+0.5 deg C)")
-ax1.axhline(1.5,  color="#B71C1C", linewidth=0.8, linestyle=":",
-            label="Strong El Nino (+1.5 deg C)")
-ax1.axhline(-0.5, color="#1565C0", linewidth=0.8, linestyle="--",
-            label="La Nina threshold (-0.5 deg C)")
-ax1.set_ylabel("Oceanic Nino Index (deg C)", fontsize=10, color="#424242")
-ax1.tick_params(axis="y", labelcolor="#424242")
-ax1.set_ylim(-2.5, 3.5)
+if oni_2026 is not None:
+    bar_colors = ["#EF5350" if v >= 0 else "#42A5F5" for v in oni_2026["oni"]]
+    ax1.bar(oni_2026["date"], oni_2026["oni"], width=25,
+            color=bar_colors, alpha=0.6, zorder=2, label="ONI (deg C)")
+    ax1.axhline(0,    color="black",   linewidth=0.8, linestyle="-")
+    ax1.axhline(0.5,  color="#FF7043", linewidth=0.8, linestyle="--",
+                label="El Nino threshold (+0.5 deg C)")
+    ax1.axhline(1.5,  color="#B71C1C", linewidth=0.8, linestyle=":",
+                label="Strong El Nino (+1.5 deg C)")
+    ax1.axhline(-0.5, color="#1565C0", linewidth=0.8, linestyle="--",
+                label="La Nina threshold (-0.5 deg C)")
+    ax1.set_ylabel("Oceanic Nino Index (deg C)", fontsize=10, color="#424242")
+    ax1.tick_params(axis="y", labelcolor="#424242")
+    ax1.set_ylim(-2.5, 3.5)
+else:
+    ax1.set_yticks([])
+    ax1.set_ylabel("")
 
 ax2 = ax1.twinx()
 ax2.plot(caribbean_dhw["date"], caribbean_dhw["mean_dhw"],
@@ -736,15 +783,28 @@ ax1.legend(lines1 + lines2, labels1 + labels2,
 
 ax1.set_xlabel("")
 ax1.tick_params(axis="x", labelsize=8, rotation=30)
+
+if oni_source == "live":
+    oni_note = "ONI source: NOAA Climate Prediction Center"
+elif oni_source == "cache":
+    oni_note = "ONI: last cached fetch — live CPC data unavailable this render"
+else:
+    oni_note = "ONI data unavailable for this render"
+
 fig.suptitle(
     f"Oceanic Nino Index vs. Mean Reef DHW by Basin -- 2026 YTD\n"
-    f"ONI source: NOAA Climate Prediction Center  |  "
+    f"{oni_note}  |  "
     f"DHW: NOAA Coral Reef Watch v3.1  |  as of {fetch_stamp}",
     fontsize=10
 )
 plt.tight_layout()
 plt.savefig(OUTPUT_DIR / "oni_vs_dhw_2026.png", dpi=150, bbox_inches="tight")
 plt.show()
+
+if oni_source == "cache":
+    print("Note: ONI bars shown above reflect a cached last-known-good fetch — live CPC data was unavailable during this render.")
+elif oni_source is None:
+    print("Note: ONI data was unavailable for this render. Bars and El Niño/La Niña threshold lines are not shown.")
 ```
 
 The chart above is worth reading carefully. The Indo-Pacific DHW peak in
