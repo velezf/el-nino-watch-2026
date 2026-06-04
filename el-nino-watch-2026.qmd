@@ -87,17 +87,23 @@ CRW_BASE_URL = "https://coralreefwatch.noaa.gov/product/vs/data/{station_id}.txt
 ONI_URL      = "https://www.cpc.ncep.noaa.gov/data/indices/oni.ascii.txt"
 
 # -- Alert level classifier (NOAA 5-level system, expanded December 2023) -----
-def dhw_to_alert(dhw):
+def dhw_to_alert(dhw, hotspot=None):
     """
-    Map a DHW value (deg C-weeks) to a NOAA CRW bleaching alert level string.
+    Map DHW and HotSpot values to a NOAA CRW bleaching alert level string.
+
+    No Stress is determined by HotSpot (SST minus MMM baseline) <= 0, not by
+    DHW being negative — DHW is a clamped accumulator and is never negative in
+    practice. The 5-level DHW thresholds apply once HotSpot is positive.
 
     The 5-level system was expanded from the legacy 2-level system in December
     2023 in response to extreme heat stress events that exceeded Level 2 ceilings.
     Levels 3-5 represent conditions with no historical precedent at most sites.
     """
-    if pd.isna(dhw) or dhw < 0:
+    if pd.isna(dhw):
         return "No Stress"
-    elif dhw < 4:
+    if hotspot is not None and not pd.isna(hotspot) and hotspot <= 0:
+        return "No Stress"
+    if dhw < 4:
         return "Bleaching Watch"
     elif dhw < 8:
         return "Bleaching Warning"
@@ -427,7 +433,7 @@ for name, cfg in STATIONS.items():
 rows = []
 for name, df in site_data.items():
     last = df.iloc[-1]
-    alert = dhw_to_alert(last["dhw"])
+    alert = dhw_to_alert(last["dhw"], last.get("hotspot"))
     rows.append({
         "Site":              name,
         "Ocean basin":       STATIONS[name]["ocean"],
@@ -476,8 +482,10 @@ styled
 ```
 
 **How to read this table:** DHW (Degree Heating Weeks) accumulates thermal stress over a
-rolling 84-day window. The NOAA CRW 5-level alert system (expanded December 2023):
-Watch < 4, Warning < 8, Alert Level 1 < 12, Alert Level 2 < 16, Alert Level 3 < 20,
+rolling 84-day window. No Stress means SST is at or below the site's MMM bleaching
+baseline (HotSpot ≤ 0); Watch begins once SST exceeds it (HotSpot > 0, DHW < 4).
+The NOAA CRW 5-level alert system (expanded December 2023):
+Warning < 8, Alert Level 1 < 12, Alert Level 2 < 16, Alert Level 3 < 20,
 Alert Level 4 < 24, Alert Level 5 >= 24 °C-weeks. Values above 8 °C-weeks are strongly
 associated with mass bleaching; values above 16 represent conditions with limited
 historical precedent at most sites.
@@ -558,6 +566,59 @@ else:
     plt.savefig(OUTPUT_DIR / "dhw_panel_2026.png", dpi=150, bbox_inches="tight")
     plt.show()
 ```
+
+---
+
+## 2026 SST anomaly time series
+
+DHW measures accumulated heat stress and stays near zero until SST sustains more than 1°C above the site's bleaching baseline — it is a lagging indicator. SST anomaly is the departure from the long-term average and responds immediately to warming, making it a leading indicator that shows heat building earlier in the season.
+
+```{python}
+# =============================================================================
+# SST anomaly time series panel plot
+# =============================================================================
+sites_to_plot_anom = list(site_data.keys())
+n_anom = len(sites_to_plot_anom)
+
+if n_anom == 0:
+    print("No data to plot.")
+else:
+    ncols_a = 2
+    nrows_a = (n_anom + ncols_a - 1) // ncols_a
+    fig_a, axes_a = plt.subplots(nrows_a, ncols_a, figsize=(14, nrows_a * 3.2),
+                                 sharey=False, constrained_layout=True)
+    axes_flat_a = axes_a.flat if n_anom > 1 else [axes_a]
+
+    for ax, name in zip(axes_flat_a, sites_to_plot_anom):
+        df = site_data[name]
+        vals = df["sst_anom"]
+        dates = df["date"]
+
+        ax.axhline(0, color="black", linewidth=0.8, linestyle="-", zorder=2)
+        ax.fill_between(dates, vals, 0,
+                        where=(vals >= 0), color="#EF5350", alpha=0.35, zorder=1)
+        ax.fill_between(dates, vals, 0,
+                        where=(vals < 0),  color="#42A5F5", alpha=0.35, zorder=1)
+        ax.plot(dates, vals, color="#424242", linewidth=1.4, zorder=3)
+
+        ax.set_title(name, fontsize=10, fontweight="bold", pad=4)
+        ax.set_xlabel("")
+        ax.set_ylabel("SST anomaly (°C)", fontsize=8)
+        ax.tick_params(axis="x", labelsize=7, rotation=30)
+        ax.tick_params(axis="y", labelsize=8)
+
+    for i in range(n_anom, nrows_a * ncols_a):
+        axes_a.flat[i].set_visible(False)
+
+    fig_a.suptitle(f"2026 YTD SST Anomaly — 7 Reef Sites\n"
+                   f"NOAA Coral Reef Watch v3.1  |  as of {fetch_stamp}",
+                   fontsize=11, y=1.01)
+
+    plt.savefig(OUTPUT_DIR / "sst_anom_panel_2026.png", dpi=150, bbox_inches="tight")
+    plt.show()
+```
+
+SST anomaly is the departure from the long-term average for the date and is distinct from DHW (accumulated thermal stress) — it flags heat building, not bleaching underway.
 
 ---
 
