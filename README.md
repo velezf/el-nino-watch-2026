@@ -32,7 +32,7 @@ NOAA Coral Reef Watch Version 3.1 Daily 5km Satellite Coral Bleaching Heat Stres
 
 NOAA Climate Prediction Center Oceanic Niño Index (ONI). Available at: https://www.cpc.ncep.noaa.gov/
 
-Both sources are fetched live via the CRW Virtual Station feed (space-delimited `.txt` files) and cached locally in `data/raw/` on first run.
+CRW data are fetched live from the Virtual Station feed (space-delimited `.txt` files) and ONI from the CPC `oni.ascii.txt` file; both are cached locally in `data/raw/` on first run.
 
 ---
 
@@ -69,7 +69,18 @@ On first run, the notebooks fetch live data from NOAA CRW and NOAA CPC and cache
 
 ### 5. View the Quarto portfolio page (optional)
 
-The narrative Quarto page (`el-nino-watch-2026.qmd`) lives in the [velezf.github.io](https://github.com/velezf/velezf.github.io) site repo under `projects/`, where it is rendered and deployed. It is intentionally not tracked here — this repo holds the analysis notebooks. The rendered page is published at the portfolio link above.
+The narrative Quarto page (`el-nino-watch-2026.qmd`) is tracked here as the production copy. To deploy, copy it into the [velezf.github.io](https://github.com/velezf/velezf.github.io) site repo under `projects/` and push; the site's GitHub Actions workflow renders and publishes it (and re-renders daily at 06:00 UTC).
+
+```bash
+cp el-nino-watch-2026.qmd ../velezf.github.io/projects/
+cd ../velezf.github.io && git add projects/el-nino-watch-2026.qmd && git commit -m "el-nino: ..." && git push
+```
+
+To render locally, register the kernel (step 3) and point Quarto at this project's Python:
+
+```bash
+QUARTO_PYTHON=.venv/bin/python quarto render el-nino-watch-2026.qmd
+```
 
 ---
 
@@ -85,6 +96,7 @@ el-nino-watch-2026/
 ├── uv.lock                                    # Pinned dependency lock file
 ├── coral_bleaching_dhw_analysis.ipynb         # Dev notebook — historical bleaching risk (Project 1)
 ├── el-nino-watch-2026-dev.ipynb               # Dev notebook — live El Niño monitoring (Project 2)
+├── el-nino-watch-2026.qmd                     # Production Quarto page — copied to the site repo to deploy
 ├── references.bib                             # BibTeX citations for both projects
 │
 └── data/                                      # Generated at run time — not committed
@@ -92,8 +104,8 @@ el-nino-watch-2026/
     └── processed/                             # Figure outputs — regenerated on every render
 ```
 
-> The Quarto page (`el-nino-watch-2026.qmd`, `_quarto.yml`) and rendered outputs are
-> gitignored; they live in the site repo or local working directory only.
+> Rendered outputs (`el-nino-watch-2026.html`, `el-nino-watch-2026_files/`) and any local
+> `_quarto.yml` are gitignored; the site repo holds the deployed render.
 
 ---
 

@@ -224,7 +224,6 @@ data/processed/
 
 /.quarto/
 **/*.quarto_ipynb
-el-nino-watch-2026.qmd
 el-nino-watch-2026.html
 el-nino-watch-2026_files/
 _quarto.yml
