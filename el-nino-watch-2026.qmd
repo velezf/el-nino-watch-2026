@@ -580,14 +580,19 @@ else:
 
     # NOAA CRW DHW bands (HotSpot >= 1 assumed once DHW is accumulating).
     # 0-4 is Watch or Warning depending on HotSpot; the split is not visible
-    # on a DHW axis, so it is shaded as one band.
+    # on a DHW axis, so it is shaded as one band. The last band is open-ended.
+    # The shading, the dashed L1-L5 lines, and the legend are all derived from
+    # this one list so they cannot disagree with each other or with the
+    # dhw_to_alert() thresholds in Cell 1.
     alert_bands = [
-        (0,  4,  "#FFF9C4", "Watch/Warning"),
-        (4,  8,  "#FFCDD2", "Alert 1"),
-        (8,  12, "#E1BEE7", "Alert 2"),
-        (12, 16, "#F8BBD9", "Alert 3"),
-        (16, 20, "#FFCCBC", "Alert 4"),
+        (0,  4,    "#FFF9C4", "Watch/Warning (0-4 °C-wk)"),
+        (4,  8,    "#FFCDD2", "Alert 1 (4-8)"),
+        (8,  12,   "#E1BEE7", "Alert 2 (8-12)"),
+        (12, 16,   "#F8BBD9", "Alert 3 (12-16)"),
+        (16, 20,   "#FFCCBC", "Alert 4 (16-20)"),
+        (20, None, "#CFD8DC", "Alert 5 (>=20)"),
     ]
+    level_lines = [(ylo, f"L{i}") for i, (ylo, _, _, _) in enumerate(alert_bands) if i > 0]
 
     for ax, name in zip(axes_flat, sites_to_plot):
         df = site_data[name]
@@ -595,12 +600,13 @@ else:
 
         ymax = max(df["dhw"].max() * 1.15, 10)
         for ylo, yhi, color, _ in alert_bands:
-            ax.axhspan(ylo, min(yhi, ymax), color=color, alpha=0.45, zorder=0)
-        if ymax > 20:
-            ax.axhspan(20, ymax, color="#CFD8DC", alpha=0.35, zorder=0)
+            if ylo >= ymax:
+                continue
+            open_ended = yhi is None
+            ax.axhspan(ylo, ymax if open_ended else min(yhi, ymax),
+                       color=color, alpha=0.35 if open_ended else 0.45, zorder=0)
 
-        for thresh, label in [(4, "L1"), (8, "L2"), (12, "L3"),
-                               (16, "L4"), (20, "L5")]:
+        for thresh, label in level_lines:
             if thresh <= ymax:
                 ax.axhline(thresh, color="gray", linewidth=0.6,
                            linestyle="--", zorder=2)
@@ -617,16 +623,9 @@ else:
     for i in range(n, nrows * ncols):
         axes.flat[i].set_visible(False)
 
-    legend_handles = [
-        mpatches.Patch(color="#FFF9C4", label="Watch (0-4 °C-wk)"),
-        mpatches.Patch(color="#FFE0B2", label="Warning (4-8)"),
-        mpatches.Patch(color="#FFCDD2", label="Alert 1 (8-12)"),
-        mpatches.Patch(color="#E1BEE7", label="Alert 2 (12-16)"),
-        mpatches.Patch(color="#F8BBD9", label="Alert 3 (16-20)"),
-        mpatches.Patch(color="#FFCCBC", label="Alert 4 (20-24)"),
-        mpatches.Patch(color="#CFD8DC", label="Alert 5 (>=24)"),
-    ]
-    fig.legend(handles=legend_handles, loc="lower center", ncol=4,
+    legend_handles = [mpatches.Patch(color=color, label=label)
+                      for _, _, color, label in alert_bands]
+    fig.legend(handles=legend_handles, loc="lower center", ncol=3,
                bbox_to_anchor=(0.5, -0.04), fontsize=8.5, framealpha=0.9)
 
     fig.suptitle(f"2026 YTD Degree Heating Weeks — 7 Reef Sites\n"
